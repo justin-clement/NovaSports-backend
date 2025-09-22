@@ -1,21 +1,23 @@
-from fastapi import FastAPI, Response, Cookie, HTTPException, BackgroundTasks, Depends
+from fastapi import FastAPI, Response, Cookie, HTTPException, BackgroundTasks, Depends, Request, Header
 from fastapi.middleware.cors import CORSMiddleware
-import pendulum
-import psycopg
 from passlib.context import CryptContext
-from models import NewUser, NovaUser, Recommendation, Subscriber
-from side_functions import clean, verify_access_tag
-from db import database_connection
 from jose import jwt, ExpiredSignatureError, JWTError
 from dotenv import load_dotenv
+import pendulum
 import os
+
+from models import NewUser, NovaUser, Recommendation
+from side_functions import clean, add_subscriber, verify_webhook, manage_subscriptions
+from db import database_connection
+
+
 
 # THIS IS THE WEB BACKEND FOR NOVA SPORTS, HANDLING REGISTRATION, 
 # LOGIN, GAME RECOMMENDATIONS, ETC.
 
 load_dotenv()
 
-app = FastAPI()
+app = FastAPI(lifespan=manage_subscriptions)
 
 app.add_middleware(
     CORSMiddleware,
@@ -29,6 +31,7 @@ app.add_middleware(
 SECRET_KEY = os.getenv("SECRET_KEY")
 DB_URL = os.getenv("DB_URL")
 NOVA_ADMIN = os.getenv("NOVA_ADMIN")
+PAYSTACK_KEY = os.getenv("PAYSTACK_sECRET_KEY")
 
 # PASSLIB CONTEXT TO HANDLE PASSWORDS.
 password_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
@@ -163,86 +166,68 @@ async def fetch_recommendation(access_tag: str = Cookie(None), cursor=Depends(da
 
 # ROUTE TO SEND A USER'S SUBSCRIPTION INFO TO THE FRONTEND.
 @app.get('/subscriptions/{nickname}')
-async def fetch_user_subscription(nickname: str):
+async def fetch_user_subscription(nickname: str, cursor=Depends(database_connection)):
     """User's subscription info is sent to the frontend, 
     to be displayed in the Subscriptions tab of their profile."""
 
-    async with psycopg.AsyncConnection.connect(DB_URL) as conn:
-        cursor = conn.cursor()
-        query = "SELECT subscription, expiry FROM Subscriptions WHERE nickname = %s"
-        await cursor.execute(query, (clean(nickname),))
-        result = await cursor.fetchone()
-        if result is None:
+    query = "SELECT subscription, expiry FROM Subscriptions WHERE nickname = %s"
+    await cursor.execute(query, (clean(nickname),))
+    result = await cursor.fetchone()
+    if result is None:
+        return {'status': False, 
+                'message': "No active subscription."}
+    else:
+        user_subscription = result[0]
+        expiry = pendulum.from_timestamp(result[1], tz="UTC")
+        current_date = pendulum.now("UTC")
+
+        if current_date > expiry:
             return {'status': False, 
-                    'message': "No active subscription."}
+                    'message': "Your subscription is expired. Renew to keep receiving hot matchday recommendations."}
+        elif current_date.add(days=7) > expiry:
+            return {'status': True, 'subscription': user_subscription, 
+                    'message': "Your Nova subscription will expire soon."}
         else:
-            user_subscription = result[0]
-            expiry = pendulum.from_timestamp(result[1], tz="UTC")
-            current_date = pendulum.now("UTC")
+            return {'status': True, 'subscription': user_subscription, 
+                    'message': ""}
 
-            if current_date > expiry:
-                return {'status': False, 
-                        'message': "Your subscription is expired. Renew to keep receiving hot matchday recommendations."}
-            elif current_date.add(days=7) > expiry:
-                return {'status': True, 'subscription': user_subscription, 
-                        'message': "Your Nova subscription will expire soon."}
-            else:
-                return {'status': True, 'subscription': user_subscription, 
-                        'message': ""}
-
-
-# FUNCTION TO RECORD A NEW SUBSCRIBER IN THE DATABASE.
-async def add_subscriber(nickname: str, amount_paid: int):
-    """Record new subscriber."""
-
-    NOVA_A = 450000
-    NOVA_B = 800000
-
-    nick = clean(nickname)
-    user_subscription = ""
-
-    async with psycopg.AsyncConnection.connect(DB_URL) as conn:
-        async with conn.cursor() as cursor:
-            if amount_paid == NOVA_A:
-                user_subscription = "NOVA A"
-            elif amount_paid == NOVA_B:
-                user_subscription = "NOVA B"
-
-            query = "INSERT INTO Subscriptions (nickname, subscription, date_subscribed, expiry) " \
-            "VALUES (%s, %s, %s, %s)"
-
-            subscription_start = pendulum.now('UTC')
-            subscription_end = subscription_start.add(days=28)
-
-            await cursor.execute(query, (nick, user_subscription, 
-                                subscription_start.int_timestamp, subscription_end.int_timestamp))
-            await conn.commit()
 
 # ADMIN ENDPOINT FOR HANDLING RECOMMENDATION UPLOADS.
 @app.post('/add-recommendations')
-async def upload_recommendations(data: Recommendation, access_tag: str = Cookie(None)):
-    if access_tag == None:
+async def upload_recommendations(data: Recommendation, access_tag: str = Cookie(None), cursor=Depends(database_connection)):
+    if access_tag is None:
         raise HTTPException(status_code=401, detail="You are not authorized to use this endpoint.")
     try:
         tag_information = jwt.decode(access_tag, SECRET_KEY, algorithms=["HS256"])
         if tag_information["role"] != "admin":
             raise HTTPException(status_code=403, detail="Access forbidden. This route is strictly admin-access.")
         else:
-            async with psycopg.AsyncConnection.connect(DB_URL) as conn:
-                cursor = conn.cursor()
-                query = "INSERT INTO Recommendations (league, home, away, recommendation) VALUES (%s, %s, %s, %s)"
-                await cursor.execute(query, (data.league, data.home, data.away, data.recommendation))
-                await conn.commit()
+            query = "INSERT INTO Recommendations (league, home, away, recommendation) VALUES (%s, %s, %s, %s);"
+            await cursor.execute(query, (data.league, data.home, data.away, data.recommendation))
 
-                return {"message": "Recommendation uploaded."}
+            return {'status': True, 'message': "Recommendation uploaded."}
+        
     except ExpiredSignatureError:
-        raise HTTPException(status_code=401, detail="Your access tag is expired. Re-login to upload recommendations.")
+        raise HTTPException(status_code=401, 
+                            detail="Your access tag is expired. Re-login to upload recommendations.")
     except JWTError:
-        raise HTTPException(status_code=403, detail="Your access tag could not be read. Login with a Novasports account.")
+        raise HTTPException(status_code=403, 
+                            detail="Your access tag could not be read. Login with a Novasports account.")
 
-# WEBHOOK TO CONFIRM NEW SUBSCRIPTION PAYMENT.    
+
+# WEBHOOK FOR CONFIRMING NEW SUBSCRIPTION PAYMENTS.    
 @app.post('/webhook/new-subscription')
-async def new_subscription(payment_data: Subscriber, background_tasks: BackgroundTasks):
+async def new_subscription(payment_data: dict, request: Request, background_tasks: BackgroundTasks, x_paystack_signature: str = Header(None)):  
     """Acknowledge subscription transaction."""
-    await background_tasks.add_task(add_subscriber, payment_data)
-    return {"status": True}
+
+    request_body = await request.body()
+    if x_paystack_signature is None:
+        raise HTTPException(status_code=401, detail="You are not Paystack.")
+    if not verify_webhook(request_body, x_paystack_signature, PAYSTACK_KEY):
+        raise HTTPException(status_code=401, detail="Signature confirmation failed.")
+    
+    user = payment_data["metadata"]["nickname"]
+    amount = payment_data["data"]["amount"]
+    
+    background_tasks.add_task(add_subscriber, user, amount)
+    return {'status': True}

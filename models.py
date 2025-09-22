@@ -1,10 +1,10 @@
 from pydantic import BaseModel
 
-class NovaUser:
+class NovaUser(BaseModel):
     nickname: str
     password: str
 
-class NewUser:
+class NewUser(BaseModel):
     first_name: str
     last_name: str
     gender: str
@@ -13,15 +13,12 @@ class NewUser:
     nickname: str
     password: str
 
-class Recommendation:
+class Recommendation(BaseModel):
     league: str
     home: str
     away: str
     recommendation: str
 
-class ID_check:
-    id: str
-
-class Subscriber: 
+class Subscriber(BaseModel): 
     nickname: str
     amount_paid: int
