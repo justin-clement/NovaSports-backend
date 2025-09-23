@@ -8,7 +8,6 @@ import hmac
 import hashlib
 
 
-
 scheduler = AsyncIOScheduler()
 
 def clean(string: str):
@@ -59,7 +58,7 @@ async def add_subscriber(nickname: str, amount_paid: int, cursor=Depends(databas
     await cursor.execute(query, (nick, user_subscription, 
                         subscription_start.int_timestamp, subscription_end.int_timestamp))
 
-def verify_webhook(request_body: bytes, signature: str, secret_key: str) -> bool:
+def verify_signature(request_body: bytes, signature: str, secret_key: str) -> bool:
     """Use HMAC to verify Paystack as the originator of the webhook request."""
 
     computed_signature = hmac.new(
@@ -69,4 +68,3 @@ def verify_webhook(request_body: bytes, signature: str, secret_key: str) -> bool
     ).hexdigest()
 
     return hmac.compare_digest(computed_signature, signature)
-

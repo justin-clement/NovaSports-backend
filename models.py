@@ -18,7 +18,3 @@ class Recommendation(BaseModel):
     home: str
     away: str
     recommendation: str
-
-class Subscriber(BaseModel): 
-    nickname: str
-    amount_paid: int

@@ -7,44 +7,45 @@ import pendulum
 import os
 
 from models import NewUser, NovaUser, Recommendation
-from side_functions import clean, add_subscriber, verify_webhook, manage_subscriptions
+from side_functions import clean, add_subscriber, verify_signature, manage_subscriptions
 from db import database_connection
 
 
-
-# THIS IS THE WEB BACKEND FOR NOVA SPORTS, HANDLING REGISTRATION, 
-# LOGIN, GAME RECOMMENDATIONS, ETC.
-
+# LOAD ENVIRONMENT VARIABLES.
 load_dotenv()
 
+SECRET_KEY = os.getenv("SECRET_KEY")
+DB_URL = os.getenv("DB_URL")
+NOVA_ADMIN = os.getenv("NOVA_ADMIN")
+PAYSTACK_KEY = os.getenv("PAYSTACK_SECRET_KEY")
+FRONTEND_URL = os.getenv("FRONTEND_URL")
+
+# INSTANTIATE APPLICATION.
 app = FastAPI(lifespan=manage_subscriptions)
 
+# CONFIGURE CORS MIDDLEWARE.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173/"], 
+    allow_origins=[FRONTEND_URL], 
     allow_credentials=True,
     allow_methods=["*"], 
     allow_headers=["*"], 
 )
 
-# ENVIRONMENT VARIABLES.
-SECRET_KEY = os.getenv("SECRET_KEY")
-DB_URL = os.getenv("DB_URL")
-NOVA_ADMIN = os.getenv("NOVA_ADMIN")
-PAYSTACK_KEY = os.getenv("PAYSTACK_sECRET_KEY")
-
 # PASSLIB CONTEXT TO HANDLE PASSWORDS.
 password_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 
+# ---------------------------- ROUTES ----------------------------
+
 # ROUTE FOR HADNLING SIGN UP.
 @app.post('/sign-up')
 async def register_new_user(signup_details: NewUser, cursor=Depends(database_connection)):
-    """Register a new user."""
+    """Sign up new user."""
 
     create_user = "INSERT INTO Users (first_name, last_name, gender, email, " \
     "phone_number, nickname, password) VALUES (%s, %s, %s, %s, %s, %s, %s)"
-    check_user = "SELECT 1 FROM NovaUsers WHERE nickname = %s OR email = %s OR phone_number = %s"
+    check_user = "SELECT 1 FROM Users WHERE nickname = %s OR email = %s OR phone_number = %s"
     await cursor.execute(check_user, (clean(signup_details.nickname), clean(signup_details.email), 
                                 clean(signup_details.phone_number)))
     user_exists = await cursor.fetchone()
@@ -106,10 +107,38 @@ async def check_nickname(nickname: str, cursor=Depends(database_connection)):
     result = await cursor.fetchone()
     if result is not None:
         return {'status': False, 
-                "message": "This nickname is taken."}
+                'message': "This nickname is taken."}
     else:
         return {'status': True, 
-                "message": "Nickname available."}
+                'message': "Nickname available."}
+
+
+# ROUTE TO SEND A USER'S SUBSCRIPTION INFO TO THE FRONTEND.
+@app.get('/subscriptions/{nickname}')
+async def fetch_user_subscription(nickname: str, cursor=Depends(database_connection)):
+    """User's subscription info is sent to the frontend, 
+    to be displayed in the Subscriptions tab of their profile."""
+
+    query = "SELECT subscription, expiry FROM Subscriptions WHERE nickname = %s"
+    await cursor.execute(query, (clean(nickname),))
+    result = await cursor.fetchone()
+    if result is None:
+        return {'status': False, 
+                'message': "No active subscription."}
+    else:
+        user_subscription = result[0]
+        expiry = pendulum.from_timestamp(result[1], tz="UTC")
+        current_date = pendulum.now("UTC")
+
+        if current_date > expiry:
+            return {'status': False, 
+                    'message': "Your subscription is expired. Renew to keep receiving hot matchday recommendations."}
+        elif current_date.add(days=7) > expiry:
+            return {'status': True, 'subscription': user_subscription, 
+                    'message': "Your subscription will expire soon."}
+        else:
+            return {'status': True, 'subscription': user_subscription, 
+                    'message': ""}
 
 
 # ROUTE FOR FETCHING MATCHDAY RECOMMMENDATIONS.
@@ -125,7 +154,7 @@ async def fetch_recommendation(access_tag: str = Cookie(None), cursor=Depends(da
         user_nick = tag_from_client.get("user")
 
         # CHECK THE USER'S SUBSCRIPTION FIRST.
-        query = "SELECT subscription FROM Subscriptions WHERE nickname = %s"
+        query = "SELECT subscription FROM Subscriptions WHERE nickname = %s;"
         await cursor.execute(query, (user_nick,))
         result = await cursor.fetchone()
         if result is None:
@@ -157,39 +186,12 @@ async def fetch_recommendation(access_tag: str = Cookie(None), cursor=Depends(da
                 return {'status': True, 'array': recommendations}
             
     except ExpiredSignatureError:
-        return {'status': False, 
+        return {'status': None, 
                 'message': "Your access tag is expired, but don't worry. Just login again."}
     except JWTError:
         raise HTTPException(status_code=401, 
                             detail="We cannot read your access tag. Please login with a Novasports account.")
     
-
-# ROUTE TO SEND A USER'S SUBSCRIPTION INFO TO THE FRONTEND.
-@app.get('/subscriptions/{nickname}')
-async def fetch_user_subscription(nickname: str, cursor=Depends(database_connection)):
-    """User's subscription info is sent to the frontend, 
-    to be displayed in the Subscriptions tab of their profile."""
-
-    query = "SELECT subscription, expiry FROM Subscriptions WHERE nickname = %s"
-    await cursor.execute(query, (clean(nickname),))
-    result = await cursor.fetchone()
-    if result is None:
-        return {'status': False, 
-                'message': "No active subscription."}
-    else:
-        user_subscription = result[0]
-        expiry = pendulum.from_timestamp(result[1], tz="UTC")
-        current_date = pendulum.now("UTC")
-
-        if current_date > expiry:
-            return {'status': False, 
-                    'message': "Your subscription is expired. Renew to keep receiving hot matchday recommendations."}
-        elif current_date.add(days=7) > expiry:
-            return {'status': True, 'subscription': user_subscription, 
-                    'message': "Your Nova subscription will expire soon."}
-        else:
-            return {'status': True, 'subscription': user_subscription, 
-                    'message': ""}
 
 
 # ADMIN ENDPOINT FOR HANDLING RECOMMENDATION UPLOADS.
@@ -223,7 +225,7 @@ async def new_subscription(payment_data: dict, request: Request, background_task
     request_body = await request.body()
     if x_paystack_signature is None:
         raise HTTPException(status_code=401, detail="You are not Paystack.")
-    if not verify_webhook(request_body, x_paystack_signature, PAYSTACK_KEY):
+    if not verify_signature(request_body, x_paystack_signature, PAYSTACK_KEY):
         raise HTTPException(status_code=401, detail="Signature confirmation failed.")
     
     user = payment_data["metadata"]["nickname"]
