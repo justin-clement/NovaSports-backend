@@ -1,5 +1,8 @@
 from fastapi import FastAPI, Response, Cookie, HTTPException, BackgroundTasks, Depends, Request, Header
 from fastapi.middleware.cors import CORSMiddleware
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
 from passlib.context import CryptContext
 from jose import jwt, ExpiredSignatureError, JWTError
 from dotenv import load_dotenv
@@ -19,9 +22,14 @@ DB_URL = os.getenv("DB_URL")
 NOVA_ADMIN = os.getenv("NOVA_ADMIN")
 PAYSTACK_KEY = os.getenv("PAYSTACK_SECRET_KEY")
 FRONTEND_URL = os.getenv("FRONTEND_URL")
+TOKEN_ALGORITHM = os.getenv("TOKEN_ALGORITHM")
 
-# INSTANTIATE APPLICATION.
+limiter = Limiter(key_func=get_remote_address)
+
+# INSTANTIATE & CONFIGURE APPLICATION.
 app = FastAPI(lifespan=manage_subscriptions)
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 # CONFIGURE CORS MIDDLEWARE.
 app.add_middleware(
@@ -39,6 +47,7 @@ password_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 # ---------------------------- ROUTES ----------------------------
 
 # ROUTE FOR HADNLING SIGN UP.
+@limiter.limit("10/minute")
 @app.post('/sign-up')
 async def register_new_user(signup_details: NewUser, cursor=Depends(database_connection)):
     """Sign up new user."""
@@ -64,6 +73,7 @@ async def register_new_user(signup_details: NewUser, cursor=Depends(database_con
                 'message': f"{signup_details.nickname}, registered successfully."}
 
 # ROUTE FOR HANDLING LOG IN.
+@limiter.limit("10/minute")
 @app.post('/sign-in/')
 async def login(login_details: NovaUser, response: Response, cursor=Depends(database_connection)):
     """Sign in users."""
@@ -82,7 +92,7 @@ async def login(login_details: NovaUser, response: Response, cursor=Depends(data
         payload = {"user": nickname, 
                 "role": f"{'user' if nickname != NOVA_ADMIN else 'admin'}", 
                 "exp": pendulum.now('UTC').add(hours=1).int_timestamp}
-        tag = jwt.encode(payload, SECRET_KEY, algorithm="HS256")
+        tag = jwt.encode(payload, SECRET_KEY, algorithm=TOKEN_ALGORITHM)
 
         response.set_cookie(
             key="access_tag", 
@@ -114,6 +124,7 @@ async def check_nickname(nickname: str, cursor=Depends(database_connection)):
 
 
 # ROUTE TO SEND A USER'S SUBSCRIPTION INFO TO THE FRONTEND.
+@limiter.limit("10/minute")
 @app.get('/subscriptions/{nickname}')
 async def fetch_user_subscription(nickname: str, cursor=Depends(database_connection)):
     """User's subscription info is sent to the frontend, 
@@ -142,6 +153,7 @@ async def fetch_user_subscription(nickname: str, cursor=Depends(database_connect
 
 
 # ROUTE FOR FETCHING MATCHDAY RECOMMMENDATIONS.
+@limiter.limit("10/minute")
 @app.get('/recommendations')
 async def fetch_recommendation(access_tag: str = Cookie(None), cursor=Depends(database_connection)):
     """Get matchday recommendations."""
@@ -150,7 +162,7 @@ async def fetch_recommendation(access_tag: str = Cookie(None), cursor=Depends(da
         raise HTTPException(status_code=401, 
                             detail="Unauthorized. You currently have no access tag. Kindly log in with a Novasports account.")
     try:
-        tag_from_client = jwt.decode(access_tag, SECRET_KEY, algorithms=["HS256"])
+        tag_from_client = jwt.decode(access_tag, SECRET_KEY, algorithms=[TOKEN_ALGORITHM])
         user_nick = tag_from_client.get("user")
 
         # CHECK THE USER'S SUBSCRIPTION FIRST.
@@ -195,6 +207,7 @@ async def fetch_recommendation(access_tag: str = Cookie(None), cursor=Depends(da
 
 
 # ADMIN ENDPOINT FOR HANDLING RECOMMENDATION UPLOADS.
+@limiter.limit("10/minute")
 @app.post('/add-recommendations')
 async def upload_recommendations(data: Recommendation, access_tag: str = Cookie(None), cursor=Depends(database_connection)):
     if access_tag is None:
@@ -217,7 +230,8 @@ async def upload_recommendations(data: Recommendation, access_tag: str = Cookie(
                             detail="Your access tag could not be read. Login with a Novasports account.")
 
 
-# WEBHOOK FOR CONFIRMING NEW SUBSCRIPTION PAYMENTS.    
+# WEBHOOK FOR CONFIRMING NEW SUBSCRIPTION PAYMENTS.
+@limiter.limit("10/minute")    
 @app.post('/webhook/new-subscription')
 async def new_subscription(payment_data: dict, request: Request, background_tasks: BackgroundTasks, x_paystack_signature: str = Header(None)):  
     """Acknowledge subscription transaction."""
