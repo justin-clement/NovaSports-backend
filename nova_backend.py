@@ -47,8 +47,8 @@ password_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 # ---------------------------- ROUTES ----------------------------
 
 # ROUTE FOR HADNLING SIGN UP.
-@limiter.limit("10/minute")
 @app.post('/sign-up')
+@limiter.limit("10/minute")
 async def register_new_user(signup_details: NewUser, cursor=Depends(database_connection)):
     """Sign up new user."""
 
@@ -73,8 +73,8 @@ async def register_new_user(signup_details: NewUser, cursor=Depends(database_con
                 'message': f"{signup_details.nickname}, registered successfully."}
 
 # ROUTE FOR HANDLING LOG IN.
-@limiter.limit("10/minute")
 @app.post('/sign-in/')
+@limiter.limit("10/minute")
 async def login(login_details: NovaUser, response: Response, cursor=Depends(database_connection)):
     """Sign in users."""
 
@@ -108,6 +108,7 @@ async def login(login_details: NovaUser, response: Response, cursor=Depends(data
 
 # ROUTE FOR CHECKING A NICKNAME'S AVAILABILITY.
 @app.post('/check-nick')
+@limiter.limit("10/minute")
 async def check_nickname(nickname: str, cursor=Depends(database_connection)):
     """Check if a nickname is available before account registration."""
 
@@ -124,8 +125,8 @@ async def check_nickname(nickname: str, cursor=Depends(database_connection)):
 
 
 # ROUTE TO SEND A USER'S SUBSCRIPTION INFO TO THE FRONTEND.
-@limiter.limit("10/minute")
 @app.get('/subscriptions/{nickname}')
+@limiter.limit("10/minute")
 async def fetch_user_subscription(nickname: str, cursor=Depends(database_connection)):
     """User's subscription info is sent to the frontend, 
     to be displayed in the Subscriptions tab of their profile."""
@@ -153,8 +154,8 @@ async def fetch_user_subscription(nickname: str, cursor=Depends(database_connect
 
 
 # ROUTE FOR FETCHING MATCHDAY RECOMMMENDATIONS.
-@limiter.limit("10/minute")
 @app.get('/recommendations')
+@limiter.limit("10/minute")
 async def fetch_recommendation(access_tag: str = Cookie(None), cursor=Depends(database_connection)):
     """Get matchday recommendations."""
 
@@ -207,13 +208,13 @@ async def fetch_recommendation(access_tag: str = Cookie(None), cursor=Depends(da
 
 
 # ADMIN ENDPOINT FOR HANDLING RECOMMENDATION UPLOADS.
-@limiter.limit("10/minute")
 @app.post('/add-recommendations')
+@limiter.limit("10/minute")
 async def upload_recommendations(data: Recommendation, access_tag: str = Cookie(None), cursor=Depends(database_connection)):
     if access_tag is None:
         raise HTTPException(status_code=401, detail="You are not authorized to use this endpoint.")
     try:
-        tag_information = jwt.decode(access_tag, SECRET_KEY, algorithms=["HS256"])
+        tag_information = jwt.decode(access_tag, SECRET_KEY, algorithms=[TOKEN_ALGORITHM])
         if tag_information["role"] != "admin":
             raise HTTPException(status_code=403, detail="Access forbidden. This route is strictly admin-access.")
         else:
@@ -231,8 +232,8 @@ async def upload_recommendations(data: Recommendation, access_tag: str = Cookie(
 
 
 # WEBHOOK FOR CONFIRMING NEW SUBSCRIPTION PAYMENTS.
-@limiter.limit("10/minute")    
 @app.post('/webhook/new-subscription')
+@limiter.limit("10/minute")
 async def new_subscription(payment_data: dict, request: Request, background_tasks: BackgroundTasks, x_paystack_signature: str = Header(None)):  
     """Acknowledge subscription transaction."""
 
