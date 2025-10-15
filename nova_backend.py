@@ -23,10 +23,11 @@ NOVA_ADMIN = os.getenv("NOVA_ADMIN")
 PAYSTACK_KEY = os.getenv("PAYSTACK_SECRET_KEY")
 FRONTEND_URL = os.getenv("FRONTEND_URL")
 TOKEN_ALGORITHM = os.getenv("TOKEN_ALGORITHM")
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 
+# CONFIGURE APPLICATION.
 limiter = Limiter(key_func=get_remote_address)
 
-# INSTANTIATE & CONFIGURE APPLICATION.
 app = FastAPI(lifespan=manage_subscriptions)
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
@@ -49,12 +50,12 @@ password_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 # ROUTE FOR HADNLING SIGN UP.
 @app.post('/sign-up')
 @limiter.limit("10/minute")
-async def register_new_user(signup_details: NewUser, cursor=Depends(database_connection)):
-    """Sign up new user."""
+async def register_new_user(request: Request, signup_details: NewUser, cursor=Depends(database_connection)):
+    """Sign up a new user."""
 
     create_user = "INSERT INTO Users (first_name, last_name, gender, email, " \
-    "phone_number, nickname, password) VALUES (%s, %s, %s, %s, %s, %s, %s)"
-    check_user = "SELECT 1 FROM Users WHERE nickname = %s OR email = %s OR phone_number = %s"
+    "phone_number, nickname, password) VALUES (%s, %s, %s, %s, %s, %s, %s);"
+    check_user = "SELECT 1 FROM Users WHERE nickname = %s OR email = %s OR phone_number = %s;"
     await cursor.execute(check_user, (clean(signup_details.nickname), clean(signup_details.email), 
                                 clean(signup_details.phone_number)))
     user_exists = await cursor.fetchone()
@@ -75,11 +76,11 @@ async def register_new_user(signup_details: NewUser, cursor=Depends(database_con
 # ROUTE FOR HANDLING LOG IN.
 @app.post('/sign-in/')
 @limiter.limit("10/minute")
-async def login(login_details: NovaUser, response: Response, cursor=Depends(database_connection)):
-    """Sign in users."""
+async def login(request: Request, login_details: NovaUser, response: Response, cursor=Depends(database_connection)):
+    """Sign in a user."""
 
     nickname = clean(login_details.nickname)
-    query = "SELECT nickname, password FROM Users WHERE nickname = %s"
+    query = "SELECT nickname, password FROM Users WHERE nickname = %s;"
     await cursor.execute(query, (nickname,))
     result = await cursor.fetchone()
     if result is None:
@@ -109,7 +110,7 @@ async def login(login_details: NovaUser, response: Response, cursor=Depends(data
 # ROUTE FOR CHECKING A NICKNAME'S AVAILABILITY.
 @app.post('/check-nick')
 @limiter.limit("10/minute")
-async def check_nickname(nickname: str, cursor=Depends(database_connection)):
+async def check_nickname(request: Request, nickname: str, cursor=Depends(database_connection)):
     """Check if a nickname is available before account registration."""
 
     nick = clean(nickname)
@@ -127,11 +128,11 @@ async def check_nickname(nickname: str, cursor=Depends(database_connection)):
 # ROUTE TO SEND A USER'S SUBSCRIPTION INFO TO THE FRONTEND.
 @app.get('/subscriptions/{nickname}')
 @limiter.limit("10/minute")
-async def fetch_user_subscription(nickname: str, cursor=Depends(database_connection)):
+async def fetch_user_subscription(request: Request, nickname: str, cursor=Depends(database_connection)):
     """User's subscription info is sent to the frontend, 
     to be displayed in the Subscriptions tab of their profile."""
 
-    query = "SELECT subscription, expiry FROM Subscriptions WHERE nickname = %s"
+    query = "SELECT subscription, expiry FROM Subscriptions WHERE nickname = %s;"
     await cursor.execute(query, (clean(nickname),))
     result = await cursor.fetchone()
     if result is None:
@@ -156,7 +157,7 @@ async def fetch_user_subscription(nickname: str, cursor=Depends(database_connect
 # ROUTE FOR FETCHING MATCHDAY RECOMMMENDATIONS.
 @app.get('/recommendations')
 @limiter.limit("10/minute")
-async def fetch_recommendation(access_tag: str = Cookie(None), cursor=Depends(database_connection)):
+async def fetch_recommendations(request: Request, access_tag: str = Cookie(None), cursor=Depends(database_connection)):
     """Get matchday recommendations."""
 
     if access_tag is None:
@@ -210,7 +211,7 @@ async def fetch_recommendation(access_tag: str = Cookie(None), cursor=Depends(da
 # ADMIN ENDPOINT FOR HANDLING RECOMMENDATION UPLOADS.
 @app.post('/add-recommendations')
 @limiter.limit("10/minute")
-async def upload_recommendations(data: Recommendation, access_tag: str = Cookie(None), cursor=Depends(database_connection)):
+async def upload_recommendations(request: Request, data: Recommendation, access_tag: str = Cookie(None), cursor=Depends(database_connection)):
     if access_tag is None:
         raise HTTPException(status_code=401, detail="You are not authorized to use this endpoint.")
     try:
@@ -232,9 +233,9 @@ async def upload_recommendations(data: Recommendation, access_tag: str = Cookie(
 
 
 # WEBHOOK FOR CONFIRMING NEW SUBSCRIPTION PAYMENTS.
-@app.post('/webhook/new-subscription')
+@app.post(WEBHOOK_URL)
 @limiter.limit("10/minute")
-async def new_subscription(payment_data: dict, request: Request, background_tasks: BackgroundTasks, x_paystack_signature: str = Header(None)):  
+async def new_subscription(request: Request, payment_data: dict, background_tasks: BackgroundTasks, x_paystack_signature: str = Header(None)):  
     """Acknowledge subscription transaction."""
 
     request_body = await request.body()
@@ -243,8 +244,8 @@ async def new_subscription(payment_data: dict, request: Request, background_task
     if not verify_signature(request_body, x_paystack_signature, PAYSTACK_KEY):
         raise HTTPException(status_code=401, detail="Signature confirmation failed.")
     
-    user = payment_data["metadata"]["nickname"]
-    amount = payment_data["data"]["amount"]
+    user = payment_data["metadata"].get("nickname")
+    amount = payment_data["data"].get("amount")
     
     background_tasks.add_task(add_subscriber, user, amount)
     return {'status': True}
