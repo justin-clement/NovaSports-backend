@@ -10,7 +10,7 @@ import pendulum
 import os
 
 from models import NewUser, NovaUser, Recommendation
-from side_functions import clean, add_subscriber, verify_signature, manage_subscriptions
+from side_functions import clean, add_subscriber, verify_signature, manage_subscriptions, password_context
 from db import database_connection
 
 
@@ -40,9 +40,6 @@ app.add_middleware(
     allow_methods=["*"], 
     allow_headers=["*"], 
 )
-
-# PASSLIB CONTEXT TO HANDLE PASSWORDS.
-password_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 
 # ---------------------------- ROUTES ----------------------------
