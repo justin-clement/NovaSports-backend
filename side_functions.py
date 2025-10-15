@@ -6,7 +6,7 @@ from fastapi import Depends
 from db import database_connection
 import hmac
 import hashlib
-from passlib import CryptContext
+from passlib.context import CryptContext
 
 
 scheduler = AsyncIOScheduler()
