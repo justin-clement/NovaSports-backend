@@ -6,6 +6,7 @@ from fastapi import Depends
 from db import database_connection
 import hmac
 import hashlib
+from passlib import CryptContext
 
 
 scheduler = AsyncIOScheduler()
@@ -68,3 +69,6 @@ def verify_signature(request_body: bytes, signature: str, secret_key: str) -> bo
     ).hexdigest()
 
     return hmac.compare_digest(computed_signature, signature)
+
+# PASSLIB CONTEXT TO HANDLE PASSWORDS.
+password_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
