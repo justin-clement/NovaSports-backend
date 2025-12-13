@@ -4,9 +4,19 @@ from contextlib import asynccontextmanager
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from fastapi import Depends
 from db import database_connection
+import jwt
 import hmac
 import hashlib
+from dotenv import load_dotenv
+import os
+from passlib.context import CryptContext
 
+
+load_dotenv()
+
+PAYSTACK_KEY = os.getenv("PAYSTACK_KEY")
+APP_KEY = os.getenv("APP_KEY")
+ALGORITHM = os.getenv("ALGORITHM")
 
 scheduler = AsyncIOScheduler()
 
@@ -68,3 +78,36 @@ def verify_signature(request_body: bytes, signature: str, secret_key: str) -> bo
     ).hexdigest()
 
     return hmac.compare_digest(computed_signature, signature)
+
+def issue_tokens(nickname: str) -> tuple[str, str]:
+    access_payload = {
+        "user": nickname, 
+        "role": "user", 
+        "exp": pendulum.now('UTC').add(hours=1).int_timestamp
+    }
+
+    refresh_payload = {
+        "user": nickname, 
+        "role": "user", 
+        "exp": pendulum.now('UTC').add(days=3).int_timestamp
+    }
+
+    access_token = jwt.encode(access_payload, APP_KEY, algorithm="HS256")
+    refresh_token = jwt.encode(refresh_payload, APP_KEY, algorithm="HS256")
+
+    return (access_token, refresh_token)
+
+def verify_token(token: str) -> dict :
+    try:
+        payload = jwt.decode(token, APP_KEY, algorithms=["HS256"])
+        return payload
+    except jwt.ExpiredSignatureError:
+        return None
+    except jwt.InvalidTokenError:
+        return None
+
+
+
+
+# PASSLIB CONTEXT TO HANDLE PASSWORDS.
+password_context = CryptContext(schemes=["bcrypt"], deprecated="auto")

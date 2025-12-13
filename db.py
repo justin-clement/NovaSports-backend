@@ -43,5 +43,18 @@ subscriptions = {
     "expiry": "INTEGER NOT NULL"
 }
 
-tables = [recommendations, users, subscriptions]
-table_names = ["Recommendations", "Users", "Subscriptions"]
+# Information
+information = {
+    "title": "VARCHAR(255),", 
+    "content": "TEXT NOT NULL,", 
+    "date": "INTEGER NOT NULL"
+}
+
+# Messages
+messages = {
+    "nickname": "VARCHAR(255) PRIMARY KEY", 
+    "message": "TEXT"
+}
+
+tables = [recommendations, users, subscriptions, information, messages]
+table_names = ["Recommendations", "Users", "Subscriptions", "Information", "Messages"]
