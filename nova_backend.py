@@ -263,6 +263,19 @@ async def clear_recommmendations(access_tag: str = Cookie(None), cursor=Depends(
         query = "DELETE FROM Recommendations;"
         await cursor.execute(query)
         return {"status": True}
+
+@app.get("/logout")
+@limiter.limit("7/minute")
+async def logout_user(response: Response, access_tag: str = Cookie(None)):
+    """Log out a user by deleting their access and refresh tokens."""
+
+    if access_tag is None or sf.verify_token(access_tag) is None:
+        raise HTTPException(status_code=401, detail="Unauthorized.")
+
+    response.delete_cookie(key="access_tag", path="/")
+    response.delete_cookie(key="refresh_token", path="/")
+    
+    return {'status': True}
         
 
 # WEBHOOK FOR CONFIRMING NEW SUBSCRIPTION PAYMENTS.
