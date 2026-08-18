@@ -1,15 +1,15 @@
-import pendulum
-from fastapi import FastAPI
+from fastapi import FastAPI, Depends
 from contextlib import asynccontextmanager
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from fastapi import Depends
 from db import database_connection
+from dotenv import load_dotenv
+from passlib.context import CryptContext
+from psycopg import AsyncCursor
+import os
 import jwt
 import hmac
 import hashlib
-from dotenv import load_dotenv
-import os
-from passlib.context import CryptContext
+import pendulum
 
 
 load_dotenv()
@@ -29,7 +29,7 @@ def clean(string: str):
     except TypeError:
         return None
     
-async def refresh_subscriptions(cursor=Depends(database_connection)):
+async def refresh_subscriptions(cursor: AsyncCursor =Depends(database_connection)):
     """Check and update subscriptions in the database."""
 
     query = "DELETE FROM Subscriptions WHERE expiry < %s;"
@@ -45,7 +45,7 @@ async def manage_subscriptions(app: FastAPI):
     yield
     scheduler.shutdown()
 
-async def add_subscriber(nickname: str, amount_paid: int, cursor=Depends(database_connection)):
+async def add_subscriber(nickname: str, amount_paid: int, cursor: AsyncCursor =Depends(database_connection)):
     """Record new subscriber."""
 
     NOVA_A = 450000
@@ -55,17 +55,19 @@ async def add_subscriber(nickname: str, amount_paid: int, cursor=Depends(databas
     user_subscription = ""
 
     if amount_paid == NOVA_A:
-        user_subscription = "NOVA A"
+        user_subscription = "A"
     elif amount_paid == NOVA_B:
-        user_subscription = "NOVA B"
+        user_subscription = "B"
 
-    query = "INSERT INTO Subscriptions (nickname, subscription, date_subscribed, expiry) " \
-    "VALUES (%s, %s, %s, %s)"
+    record_subscription_query = """
+    INSERT INTO Subscriptions (nickname, subscription, date_subscribed, expiry) 
+    VALUES (%s, %s, %s, %s);
+    """
 
     subscription_start = pendulum.now('UTC')
-    subscription_end = subscription_start.add(days=28)
+    subscription_end = subscription_start.add(days=30)
 
-    await cursor.execute(query, (nick, user_subscription, 
+    await cursor.execute(record_subscription_query, (nick, user_subscription, 
                         subscription_start.int_timestamp, subscription_end.int_timestamp))
 
 def verify_signature(request_body: bytes, signature: str, secret_key: str) -> bool:
@@ -79,25 +81,36 @@ def verify_signature(request_body: bytes, signature: str, secret_key: str) -> bo
 
     return hmac.compare_digest(computed_signature, signature)
 
-def issue_tokens(nickname: str) -> tuple[str, str]:
-    access_payload = {
-        "user": nickname, 
-        "role": "user", 
-        "exp": pendulum.now('UTC').add(hours=1).int_timestamp
-    }
+def issue_tokens(nickname: str) -> tuple[str, str] | None:
+    """Issue an access and refresh token."""
+    
+    try:
+        access_payload = {
+            "user": nickname, 
+            "role": "user", 
+            "exp": pendulum.now('UTC').add(hours=1).int_timestamp
+        }
+    
+        refresh_payload = {
+            "user": nickname, 
+            "role": "user", 
+            "exp": pendulum.now('UTC').add(days=3).int_timestamp
+        }
+    
+        access_token = jwt.encode(access_payload, APP_KEY, algorithm="HS256")
+        refresh_token = jwt.encode(refresh_payload, APP_KEY, algorithm="HS256")
+    
+        return {
+            "access": access_token, 
+            "refresh": refresh_token
+        }
+    except Exception:
+        return None
+    
 
-    refresh_payload = {
-        "user": nickname, 
-        "role": "user", 
-        "exp": pendulum.now('UTC').add(days=3).int_timestamp
-    }
-
-    access_token = jwt.encode(access_payload, APP_KEY, algorithm="HS256")
-    refresh_token = jwt.encode(refresh_payload, APP_KEY, algorithm="HS256")
-
-    return (access_token, refresh_token)
-
-def verify_token(token: str) -> dict :
+def verify_token(token: str) -> dict | None:
+    """Verify the validity of a client's token."""
+    
     try:
         payload = jwt.decode(token, APP_KEY, algorithms=["HS256"])
         return payload
@@ -105,8 +118,6 @@ def verify_token(token: str) -> dict :
         return None
     except jwt.InvalidTokenError:
         return None
-
-
 
 
 # PASSLIB CONTEXT TO HANDLE PASSWORDS.

@@ -1,4 +1,6 @@
+from typing import AsyncGenerator
 from psycopg_pool import AsyncConnectionPool
+from psycopg import AsyncCursor
 from dotenv import load_dotenv
 import os
 
@@ -8,7 +10,7 @@ DB_URL = os.getenv("DB_URL")
 
 pool = AsyncConnectionPool(conninfo=DB_URL, min_size=2, max_size=24)
 
-async def database_connection():
+async def database_connection() -> AsyncGenerator[AsyncCursor, None]:
     async with pool.connection() as conn:
         async with conn.cursor() as cursor:
             yield cursor

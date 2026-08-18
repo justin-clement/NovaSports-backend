@@ -3,15 +3,17 @@ from fastapi.middleware.cors import CORSMiddleware
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
-
-import jwt
+from psycopg import AsyncCursor
+from typing import Any
 from dotenv import load_dotenv
-import pendulum
-import os
 
 from models import NewUser, NovaUser, Recommendation
-import side_functions as sf
 from db import database_connection
+
+import pendulum
+import os
+import side_functions as sf
+
 
 
 # LOAD ENVIRONMENT VARIABLES.
@@ -27,6 +29,8 @@ WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 
 # CONFIGURE APPLICATION.
 app = FastAPI(lifespan=sf.manage_subscriptions)
+
+# SET UP THE RATE LIMITER.
 limiter = Limiter(key_func=get_remote_address)
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
@@ -41,18 +45,22 @@ app.add_middleware(
 )
 
 
-# ---------------------------- ROUTES ----------------------------
+# ---------------------------- ROUTES ---------------------------- #
 
 # ROUTE FOR HADNLING SIGN UP.
 @app.post('/sign-up')
 @limiter.limit("7/minute")
-async def register_new_user(request: Request, signup_details: NewUser, cursor=Depends(database_connection)):
+async def new_user(request: Request, signup_details: NewUser, cursor: AsyncCursor = Depends(database_connection)):
     """Sign up a new user."""
 
-    create_user = "INSERT INTO Users (first_name, last_name, gender, email, " \
-    "phone_number, nickname, password) VALUES (%s, %s, %s, %s, %s, %s, %s);"
-    check_user = "SELECT 1 FROM Users WHERE nickname = %s OR email = %s OR phone_number = %s;"
-    await cursor.execute(check_user, (sf.clean(signup_details.nickname), sf.clean(signup_details.email), 
+    create_user_query = """
+    INSERT INTO Users (first_name, last_name, gender, email, phone_number, nickname, password) 
+    VALUES (%s, %s, %s, %s, %s, %s, %s);
+    """
+    check_user_query = "SELECT 1 FROM Users WHERE nickname = %s OR email = %s OR phone_number = %s;"
+    
+    # CHECK IF A USER WITH THE SAME NICKNAME, EMAIL OR PHONE NUMBER EXISTS.
+    await cursor.execute(check_user_query, (sf.clean(signup_details.nickname), sf.clean(signup_details.email), 
                                 sf.clean(signup_details.phone_number)))
     user_exists = await cursor.fetchone()
 
@@ -61,7 +69,7 @@ async def register_new_user(request: Request, signup_details: NewUser, cursor=De
                 'message': "An account already exists with the following email, nick or phone number."}
     else:
         hashed_password = sf.password_context.hash(signup_details.password)
-        await cursor.execute(create_user, (sf.clean(signup_details.first_name), sf.clean(signup_details.last_name), 
+        await cursor.execute(create_user_query, (sf.clean(signup_details.first_name), sf.clean(signup_details.last_name), 
                                         sf.clean(signup_details.gender), sf.clean(signup_details.email), 
                                         sf.clean(signup_details.phone_number), sf.clean(signup_details.nickname), 
                                         hashed_password))
@@ -73,7 +81,7 @@ async def register_new_user(request: Request, signup_details: NewUser, cursor=De
 # ROUTE FOR HANDLING LOG IN.
 @app.post('/sign-in/')
 @limiter.limit("7/minute")
-async def login(request: Request, login_details: NovaUser, response: Response, cursor=Depends(database_connection)):
+async def login(request: Request, login_details: NovaUser, response: Response, cursor: AsyncCursor = Depends(database_connection)):
     """Sign in a user."""
 
     nickname = sf.clean(login_details.nickname)
@@ -91,8 +99,8 @@ async def login(request: Request, login_details: NovaUser, response: Response, c
 
         response.set_cookie(
             key="access_tag", 
-            value=tokens[0],
-            max_age=3600, 
+            value=tokens["access"],
+            max_age=3600,   # 1 HOUR
             httponly=True, 
             samesite="lax",
             path="/"
@@ -100,8 +108,8 @@ async def login(request: Request, login_details: NovaUser, response: Response, c
 
         response.set_cookie(
             key="refresh_token", 
-            value=tokens[1],
-            max_age=3 * 24 * 3600, 
+            value=tokens["refresh"],
+            max_age=3 * 24 * 3600,   # 3 DAYS
             httponly=True, 
             samesite="lax",
             path="/"
@@ -113,12 +121,12 @@ async def login(request: Request, login_details: NovaUser, response: Response, c
 # ROUTE FOR CHECKING A NICKNAME'S AVAILABILITY.
 @app.post('/check-nick')
 @limiter.limit("10/minute")
-async def check_nickname(request: Request, nickname: str, cursor=Depends(database_connection)):
+async def check_nickname(request: Request, nickname: str, cursor: AsyncCursor = Depends(database_connection)):
     """Check if a nickname is available before account registration."""
 
     nick = sf.clean(nickname)
-    query = "SELECT 1 FROM Users WHERE nickname = %s;"
-    await cursor.execute(query, (nick,))
+    check_query = "SELECT 1 FROM Users WHERE nickname = %s;"
+    await cursor.execute(check_query, (nick,))
     result = await cursor.fetchone()
     if result is not None:
         return {'status': False, 
@@ -131,45 +139,55 @@ async def check_nickname(request: Request, nickname: str, cursor=Depends(databas
 # ROUTE TO GET NEWS/INFO FOR ALL USERS.
 @app.get('/info')
 @limiter.limit("10/minute")
-async def get_home_info(access_tag: str = Cookie(default=None), cursor=Depends(database_connection)):
-    """Fetch news or other information to be displayed to all Supernova userson their home pages."""
+async def get_home_info(access_tag: str = Cookie(default=None), cursor: AsyncCursor = Depends(database_connection)):
+    """Fetch news or other information to be displayed to all Supernova users on their profile."""
 
     if access_tag is None or sf.verify_token(access_tag) is None:
         raise HTTPException(status_code=401, detail="Unauthorized.")
     
-    query = "SELECT title, content FROM Information ORDER BY date DESC;"
-    await cursor.execute(query)
+    get_news_query = "SELECT title, content FROM Information ORDER BY date DESC;"
+    await cursor.execute(get_news_query)
     items = cursor.fetchall()   # returns a list of tuples.
     if not items:
-        return {"status": False}
+        return {
+            "status": False, 
+            "message": "General information will be communicated when available."
+        }
     else:
-        articles = []
+        articles = []   
         for item in items:
-            article = list(item)
+            article = {
+                "title": item[0], 
+                "content": item[1]
+            }
             articles.append(article)
 
         return {
             "status": True, 
-            "info": articles
+            "info": articles    # A LIST OF DICTIONARIES.
             }
 
 
 # ROUTE TO SEND A USER'S SUBSCRIPTION INFO TO THE FRONTEND.
 @app.get('/subscriptions/{nickname}')
 @limiter.limit("10/minute")
-async def fetch_user_subscription(request: Request, nickname: str, cursor=Depends(database_connection), access_tag: str = Cookie(None)):
+async def fetch_user_subscription(request: Request, nickname: str, cursor: AsyncCursor = Depends(database_connection), access_tag: str = Cookie(None)):
     """User's subscription info is sent to the frontend, 
     to be displayed in the Subscriptions tab of their profile."""
 
     if access_tag is None:
         raise HTTPException(status_code=401, detail="Unauthorized.")
 
-    query = "SELECT subscription, expiry FROM Subscriptions WHERE nickname = %s;"
-    await cursor.execute(query, (sf.clean(nickname),))
+    check_subscription_query = "SELECT subscription, expiry FROM Subscriptions WHERE nickname = %s;"
+    
+    await cursor.execute(check_subscription_query, (sf.clean(nickname),))
     result = await cursor.fetchone()
+    
     if result is None:
-        return {'status': False, 
-                'message': "No active subscription."}
+        return {
+            'status': False, 
+            'message': "No active subscription."
+        }
     else:
         user_subscription = result[0]
         expiry = pendulum.from_timestamp(result[1], tz="UTC")
@@ -177,7 +195,7 @@ async def fetch_user_subscription(request: Request, nickname: str, cursor=Depend
 
         if current_date > expiry:
             return {'status': False, 
-                    'message': "Your subscription is expired. Renew to keep receiving hot matchday recommendations."}
+                    'message': "Your subscription is expired. Renew to receive matchday recommendations."}
         elif current_date.add(days=7) > expiry:
             return {'status': True, 'subscription': user_subscription, 
                     'message': "Your subscription will expire soon."}
@@ -189,7 +207,7 @@ async def fetch_user_subscription(request: Request, nickname: str, cursor=Depend
 # ROUTE FOR FETCHING MATCHDAY RECOMMMENDATIONS.
 @app.get('/recommendations')
 @limiter.limit("10/minute")
-async def fetch_recommendations(request: Request, access_tag: str = Cookie(None), cursor=Depends(database_connection)):
+async def fetch_recommendations(request: Request, access_tag: str = Cookie(None), cursor: AsyncCursor = Depends(database_connection)):
     """Get matchday recommendations."""
 
     if access_tag is None or sf.verify_token(access_tag) is None:
@@ -200,10 +218,11 @@ async def fetch_recommendations(request: Request, access_tag: str = Cookie(None)
     user_nick = tag_from_client.get("user")
 
     # CHECK THE USER'S SUBSCRIPTION FIRST.
-    query = "SELECT subscription FROM Subscriptions WHERE nickname = %s;"
+    query = "SELECT subscription, expiry FROM Subscriptions WHERE nickname = %s;"
     await cursor.execute(query, (user_nick,))
     result = await cursor.fetchone()
-    if result is None:
+    
+    if result is None or pendulum.now("UTC") > pendulum.from_timestamp(result[1], tz="UTC"):
         return {'status': False, 
                 'message': "You have to be subscribed to receive recommendations."}
     else:
@@ -231,34 +250,35 @@ async def fetch_recommendations(request: Request, access_tag: str = Cookie(None)
 
             return {'status': True, 'array': recommendations}
     
-
+# ----------------------- ADMIN -------------------------------- #
 
 # ADMIN ENDPOINT FOR HANDLING RECOMMENDATION UPLOADS.
 @app.post('/add-recommendations')
 @limiter.limit("10/minute")
-async def upload_recommendations(request: Request, data: Recommendation, access_tag: str = Cookie(None), cursor=Depends(database_connection)):
+async def upload_recommendations(request: Request, data: Recommendation, access_tag: str = Cookie(None), cursor: AsyncCursor = Depends(database_connection)):
+    
     if access_tag is None or sf.verify_token(access_tag) is None:
-        raise HTTPException(status_code=401, detail="You are not authorized to use this endpoint.")
+        raise HTTPException(status_code=401, detail="Unauthorized. Wrong door.")
     
     tag_information = sf.verify_token(access_tag)
     if tag_information["role"] != "admin":
-        raise HTTPException(status_code=403, detail="Access forbidden. This route is strictly admin-access.")
+        raise HTTPException(status_code=403, detail="Forbidden move. This route is strictly admin-access.")
     else:
-        query = "INSERT INTO Recommendations (league, home, away, recommendation) VALUES (%s, %s, %s, %s);"
-        await cursor.execute(query, (data.league, data.home, data.away, data.recommendation))
+        insert_query = "INSERT INTO Recommendations (league, home, away, recommendation) VALUES (%s, %s, %s, %s);"
+        await cursor.execute(insert_query, (data.league, data.home, data.away, data.recommendation))
 
         return {'status': True, 'message': "Recommendation uploaded."}
     
 @app.delete("/recommendations")
 @limiter.limit("7/minute")
-async def clear_recommmendations(access_tag: str = Cookie(None), cursor=Depends(database_connection)):
+async def clear_recommmendations(access_tag: str = Cookie(None), cursor: AsyncCursor = Depends(database_connection)):
 
     if access_tag is None or sf.verify_token(access_tag) is None:
-        raise HTTPException(status_code=401, detail="Unauthorized")
+        raise HTTPException(status_code=401, detail="Unauthorized. Wrong door.")
 
     tag_information = sf.verify_token(access_tag)
     if tag_information["role"] != "admin" or tag_information["user"] != NOVA_ADMIN:
-        raise HTTPException(status_code=403, detail="Forbidden.")
+        raise HTTPException(status_code=403, detail="Forbidden move. This route is strictly admin-access.")
     else:
         query = "DELETE FROM Recommendations;"
         await cursor.execute(query)
@@ -270,7 +290,7 @@ async def logout_user(response: Response, access_tag: str = Cookie(None)):
     """Log out a user by deleting their access and refresh tokens."""
 
     if access_tag is None or sf.verify_token(access_tag) is None:
-        raise HTTPException(status_code=401, detail="Unauthorized.")
+        raise HTTPException(status_code=401, detail="Unauthorized. You can't log out from somewhere you're not in.")
 
     response.delete_cookie(key="access_tag", path="/")
     response.delete_cookie(key="refresh_token", path="/")
